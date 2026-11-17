@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Colour Matrix and Range Before Upscaling: Two Bugs That Look Identical, Measured</title>
+<meta name="description" content="A bt709/bt601 matrix mismatch and a limited/full range mismatch both tint your output. Measured against a known reference: the same bug costs 0.02 dB on mid-tones and 16 dB on saturated colour, upscaling passes the error through untouched, and a neutral ramp tells you which of the two you actually have in three lines.">
+<link rel="canonical" href="https://celticgemini001.github.io/upgolab-color-matrix-and-range/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Colour Matrix and Range Before Upscaling: Two Bugs That Look Identical, Measured">
+<meta property="og:description" content="Encoding bt709 then decoding as bt601 is an exact linear operator: a constant per-channel offset that survives any upscale bit-for-bit. Measured cost 2.53 dB and ΔE 2.78 — but 16.08 dB on saturated colour and 0.02 dB on mid-tone texture. A neutral ramp separates it from a range bug with zero ambiguity.">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Article",
+ "headline":"Colour Matrix and Range Before Upscaling: Two Bugs That Look Identical, Measured",
+ "author":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
+ "publisher":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
+ "datePublished":"2026-11-17",
+ "dateModified":"2026-11-17",
+ "mainEntityOfPage":"https://celticgemini001.github.io/upgolab-color-matrix-and-range/"}
+</script>
+<style>
+:root{--ink:#16181d;--mut:#5b6270;--line:#e2e5ea;--acc:#0a58ca}
+*{box-sizing:border-box}
+body{margin:0;color:var(--ink);font:17px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+main{max-width:46rem;margin:0 auto;padding:3rem 1.25rem 5rem}
+h1{font-size:2rem;line-height:1.22;margin:0 0 .5rem;letter-spacing:-.02em}
+h2{font-size:1.33rem;margin:2.5rem 0 .7rem}
+h3{font-size:1.08rem;margin:1.8rem 0 .5rem}
+p,li{color:#2b3038}ul,ol{padding-left:1.3rem}li{margin:.4rem 0}
+a{color:var(--acc)}
+.lede{font-size:1.14rem;color:var(--mut);margin:0 0 1.6rem}
+.meta{font-size:.88rem;color:var(--mut);border-bottom:1px solid var(--line);padding-bottom:1rem;margin-bottom:2rem}
+table{width:100%;border-collapse:collapse;margin:1.4rem 0;font-size:.94rem}
+th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--line)}
+th{font-weight:600;background:#f6f7f9;font-size:.86rem;text-transform:uppercase;letter-spacing:.03em;color:var(--mut)}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+tr.best td{background:#f2f8f2}
+callout{display:block}
+.callout{border-left:3px solid var(--acc);background:#f5f8fd;padding:.9rem 1.1rem;margin:1.6rem 0;border-radius:0 6px 6px 0}
+.callout p{margin:.3rem 0}
+pre{background:#f7f8fa;border:1px solid var(--line);border-radius:8px;padding:1rem;overflow-x:auto;font-size:.86rem}
+code{background:#f0f2f5;padding:.1rem .3rem;border-radius:3px;font-size:.9em}
+pre code{background:none;padding:0}
+footer{margin-top:4rem;padding-top:1.4rem;border-top:1px solid var(--line);font-size:.9rem;color:var(--mut)}
+.scroll{overflow-x:auto}
+.sisternav{margin:2rem 0 0;padding-top:1.2rem;border-top:1px solid #e2e5ea}
+.sisternav p{font-size:.8rem;text-transform:uppercase;letter-spacing:.05em;
+ color:#5b6270;margin:0 0 .6rem}
+.sisternav ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:.4rem .9rem}
+.sisternav li{margin:0;font-size:.88rem;line-height:1.4}
+.sisternav a{text-decoration:none;border-bottom:1px solid #d5dae2}
+.sisternav a:hover{border-bottom-color:#0a58ca}
+</style>
+</head>
+<body>
+<main>
+<article>
+<h1>Colour Matrix and Range Before Upscaling: Two Bugs That Look Identical, Measured</h1>
+<p class="lede">Your upscale comes out with a green cast and crushed shadows. You check the model,
+the sharpen amount, the encode settings, and nothing explains it. The cause is almost certainly one
+of two metadata mistakes that happened before the upscaler ever ran — and they are not the same bug,
+do not cost the same, and cannot be fixed the same way. This is a measurement of both, against a
+reference we hold, with the numbers that distinguish them.</p>
+<p class="meta">17 November 2026 · synthetic colour chart + real ffmpeg/x264 round-trips, measured with numpy, swscale and CIEDE2000</p>
+
+<h2>1. The two bugs, stated precisely</h2>
+
+<p>Video is not stored as RGB. It is stored as a luma plane and two chroma planes, and converting
+between the two requires two pieces of information that live in metadata rather than in pixels:</p>
+
+<ul>
+<li><strong>The matrix</strong> — the weights that say how much red, green and blue go into luma.
+<code>bt709</code> uses 0.2126 / 0.7152 / 0.0722; the older <code>bt601</code> uses 0.299 / 0.587 /
+0.114. They differ substantially in the green and red weights, and that difference is what produces
+the classic "everything is slightly orange" look.</li>
+<li><strong>The range</strong> — whether luma uses the full 0–255 code space (<em>full</em>, or
+<em>pc</em>) or reserves head and toe room and uses 16–235 (<em>limited</em>, or <em>tv</em>).</li>
+</ul>
+
+<p>Both are metadata. A file can be encoded with one and decoded with the other, and nothing in the
+pixel data objects. Both produce a visible colour shift. That is why they get confused. Everything
+below is about pulling them apart.</p>
+
+<div class="callout">
+<p><strong>Why this belongs in an upscaling guide.</strong> An upscaler operates on whatever
+numbers it is handed. If the numbers were decoded with the wrong matrix, the upscaler faithfully
+enlarges the wrong colour. It cannot detect the mistake, and — as §6 measures — it does not dilute
+it either. The error goes in and the same error comes out, larger.</p>
+</div>
+
+<h2>2. The reference, and why the chart is built the way it is</h2>
+
+<p>A natural photograph is the wrong instrument here, because you cannot separate "the colour is
+wrong" from "the content is just like that". The reference is a 512×512 chart with four regions,
+each chosen to exercise a different part of the conversion:</p>
+
+<ul>
+<li><strong>36 saturated and neutral patches</strong> covering primaries, secondaries, skin-ish
+mid-tones and the extremes at 0 and 255. This is where a matrix error lives.</li>
+<li><strong>A smooth 16→235 ramp</strong>. This is where a range error lives, because a range
+mistake is a linear remap of exactly that interval.</li>
+<li><strong>2-pixel horizontal bars</strong> and a <strong>1-pixel red/green boundary</strong>, to
+stress luma and chroma at high frequency respectively.</li>
+<li>Mild Gaussian texture (σ = 1.6) over everything, so PSNR is not dominated by perfectly flat
+patches.</li>
+</ul>
+
+<p>The pipeline under test is the honest one: RGB → YCbCr 4:2:0 limited → back to RGB. That
+round-trip <em>including</em> chroma subsampling is the noise floor, and every cost below is
+quoted against it rather than against a perfect RGB copy, because subsampling is a cost you have
+already accepted.</p>
+
+<p>The conversion maths is written out rather than imported, so it can be audited:</p>
+
+<pre><code>M709 = [[0.2126, 0.7152, 0.0722],
+        [-0.1146, -0.3854, 0.5000],
+        [ 0.5000, -0.4542, -0.0458]]
+
+def rgb2yuv(rgb, M, limited=True):
+    Y, Cb, Cr = rgb @ M[0], rgb @ M[1], rgb @ M[2]
+    if limited:                      # the whole difference, right here
+        Y  = Y  * 219.0/255.0 + 16.0
+        Cb = Cb * 224.0/255.0 + 128.0
+        Cr = Cr * 224.0/255.0 + 128.0
+    return np.stack([Y, Cb, Cr], -1)</code></pre>
+
+<h2>3. What each mistake costs</h2>
+
+<p>Four variants, one variable at a time. PSNR is reported alongside CIEDE2000, because PSNR in RGB
+underweights exactly the kind of error a colour bug produces — it measures per-channel squared
+error while the eye judges hue and lightness, which is what ΔE measures.</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Pipeline</th><th class="num">PSNR</th><th class="num">Cost</th><th class="num">ΔE mean</th><th class="num">ΔE p95</th></tr></thead>
+<tbody>
+<tr class="best"><td>correct — 709, limited, both ways</td><td class="num">28,64 dB</td><td class="num">—</td><td class="num">1,11</td><td class="num">2,68</td></tr>
+<tr><td>encoded 709, decoded as 601</td><td class="num">26,11 dB</td><td class="num">−2,53 dB</td><td class="num">2,78</td><td class="num">5,72</td></tr>
+<tr><td>encoded 601, decoded as 709</td><td class="num">25,92 dB</td><td class="num">−2,72 dB</td><td class="num">3,17</td><td class="num">8,73</td></tr>
+<tr><td>encoded limited, decoded as full</td><td class="num">24,40 dB</td><td class="num">−4,24 dB</td><td class="num">3,55</td><td class="num">4,56</td></tr>
+<tr><td>encoded full, decoded as limited</td><td class="num">25,32 dB</td><td class="num">−3,32 dB</td><td class="num">2,86</td><td class="num">5,41</td></tr>
+<tr><td>both wrong at once</td><td class="num">23,29 dB</td><td class="num">−5,35 dB</td><td class="num">4,30</td><td class="num">7,94</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The ΔE figures are the useful column. ΔE above roughly 2 is the threshold where a trained eye
+picks up a difference on a side-by-side; the 709-as-601 case sits at a mean of 2,78 with a 95th
+percentile of 5,72, which is comfortably visible on saturated content and invisible on grey. Note
+the ordering: <strong>a range mistake costs more than a matrix mistake</strong> (4,24 dB vs 2,53 dB)
+on this chart, and the two together cost 5,35 dB — less than the sum, because they partially
+cancel on some patches.</p>
+
+<p>That ordering is not a law. §4 shows it depends entirely on content, and on mid-tone material
+both mistakes cost almost nothing at all.</p>
+
+<h2>4. The headline result: the same bug is 0,02 dB or 16 dB, depending on content</h2>
+
+<p>Three content classes, each encoded at CRF 12 so the codec is not the variable, each decoded
+three ways. The "clean" column is the correct decode and serves as the reference for the two cost
+columns.</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Content</th><th class="num">Clean</th><th class="num">601 matrix</th><th class="num">Cost</th><th class="num">Full range</th><th class="num">Cost</th></tr></thead>
+<tbody>
+<tr class="best"><td>mid-tone texture only (60–196)</td><td class="num">22,79 dB</td><td class="num">22,77 dB</td><td class="num">−0,02</td><td class="num">22,95 dB</td><td class="num">+0,16</td></tr>
+<tr><td>saturated patches</td><td class="num">44,38 dB</td><td class="num">28,30 dB</td><td class="num">−16,08</td><td class="num">23,62 dB</td><td class="num">−20,76</td></tr>
+<tr><td>smooth gradient, full legal range</td><td class="num">44,53 dB</td><td class="num">29,76 dB</td><td class="num">−14,77</td><td class="num">29,96 dB</td><td class="num">−14,57</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Read the first row against the second. On texture confined to the middle of the range, a
+<em>completely wrong colour matrix</em> costs <strong>0,02 dB</strong>. That is not a small effect,
+it is no effect — smaller than the codec's own rounding. The full-range mistake on the same row
+scores 0,16 dB <em>better</em> than the correct decode, which is measurement noise, not a benefit.</p>
+
+<p>On saturated patches the identical matrix bug costs <strong>16,08 dB</strong>. Eight hundred
+times larger, from the same one-line metadata error.</p>
+
+<p>The mechanism is arithmetic. A neutral pixel has R = G = B, so its Cb and Cr are zero under any
+matrix — 0.2126+0.7152+0.0722 = 1, and so does 0.299+0.587+0.114. The matrix only affects pixels
+that carry chroma. Mid-tone grey noise carries none, so the matrix cannot touch it. Reproduce that
+directly:</p>
+
+<pre><code>&gt;&gt;&gt; M709 @ [1,1,1], M601 @ [1,1,1]
+(1.0, 1.0)        # both sum to exactly 1 -- neutrals are invariant</code></pre>
+
+<div class="callout">
+<p><strong>The practical consequence is uncomfortable.</strong> If you validate a colour pipeline
+on a grey ramp, a test chart of flat mid-greys, or any scene that is mostly neutral — and a great
+many test suites are exactly that — you cannot detect a matrix error at all. The measurement will
+report a pass. The bug is only visible on saturated colour, which is precisely the content people
+build colour pipelines to handle.</p>
+</div>
+
+<h2>5. Chroma is the plane that dies quietly</h2>
+
+<p>The reason a matrix error is concentrated in chroma is worth quantifying, because it explains
+why 4:2:0 footage is so much more fragile to it than RGB footage. Pushing a set of horizontal
+gratings through the 4:2:0 box filter, one frequency at a time, measuring how much amplitude
+survives:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th class="num">Period (px)</th><th class="num">cycles/px</th><th class="num">Chroma kept</th><th class="num">dB</th><th class="num">Luma kept</th></tr></thead>
+<tbody>
+<tr class="best"><td class="num">48</td><td class="num">0,021</td><td class="num">0,998</td><td class="num">−0,02</td><td class="num">1,000</td></tr>
+<tr><td class="num">24</td><td class="num">0,042</td><td class="num">0,991</td><td class="num">−0,07</td><td class="num">1,000</td></tr>
+<tr><td class="num">12</td><td class="num">0,083</td><td class="num">0,966</td><td class="num">−0,30</td><td class="num">1,000</td></tr>
+<tr><td class="num">8</td><td class="num">0,125</td><td class="num">0,924</td><td class="num">−0,69</td><td class="num">1,000</td></tr>
+<tr><td class="num">6</td><td class="num">0,167</td><td class="num">0,866</td><td class="num">−1,25</td><td class="num">1,000</td></tr>
+<tr><td class="num">4</td><td class="num">0,250</td><td class="num">0,707</td><td class="num">−3,01</td><td class="num">1,000</td></tr>
+<tr><td class="num">3</td><td class="num">0,333</td><td class="num">0,501</td><td class="num">−6,01</td><td class="num">1,000</td></tr>
+<tr><td class="num">2 (phase π/2)</td><td class="num">0,500</td><td class="num">0,000</td><td class="num">null</td><td class="num">1,000</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The last row is exact, and it is worth stating plainly: a 2-pixel chroma grating sampled at
+phase π/2 survives 4:2:0 as <strong>a constant</strong>. Input standard deviation 90,0, output
+standard deviation 0,0. The chroma channel is not blurred there, it is erased.</p>
+
+<p>The luma column is the control and it is a hard 1,000 at every frequency, because 4:2:0 never
+touches luma. Which produces the asymmetry that governs everything in this article: measured on
+white noise, luma detail survives 4:2:0 at 27,97 → 27,97 (0,00 dB, unchanged to two decimals)
+while chroma detail falls 44,58 → 22,29, a loss of <strong>6,02 dB</strong>.</p>
+
+<p>So chroma arrives at your upscaler already down 6 dB, carrying at most half its original
+information. Every bit of matrix error you feed in is applied to that depleted plane. This is why
+colour mistakes on 4:2:0 sources look worse than the same mistake on an RGB still: the plane being
+damaged is the one with the least headroom left.</p>
+
+<h2>6. Upscaling does not dilute it — and that is provable, not empirical</h2>
+
+<p>The intuitive hope is that interpolation averages neighbouring pixels, and averaging might
+soften a systematic error. It does not, and the reason is that a matrix mistake is not noise — it
+is an <strong>affine transform</strong>, and interpolation is linear, so the two commute. A
+constant per-channel offset passes through any linear resampler completely unchanged.</p>
+
+<p>Demonstrated with a 4× lanczos upscale of random content, then the same content with a
+three-channel bias added first, and the two results subtracted:</p>
+
+<pre><code>bias in        : [12.0, -9.0, 5.0]
+bias out (mean): [12.0, -9.0, 5.0]
+bias out per channel (min, max):
+  R: (12.0, 12.0)    G: (-9.0, -9.0)    B: (5.0, 5.0)</code></pre>
+
+<p>Not approximately. The minimum and maximum of the difference are both exactly the input bias, on
+every channel, at every pixel. The upscale changed nothing about the error's magnitude. A 4×
+upscale turns a small wrong colour into a four-times-larger wrong colour that occupies the same
+fraction of the frame — every metric that operates on the whole image will report it identically.</p>
+
+<p>The only way this ever changes is at the clamp. Measured on RGB content pushed near the rails, a
+bias that would otherwise be harmless can drag samples out of gamut and clip them:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Condition</th><th class="num">Out-of-range samples</th><th class="num">% of pixels</th></tr></thead>
+<tbody>
+<tr><td>matrix mismatch, 709 read as 601</td><td class="num">60 993</td><td class="num">7,76%</td></tr>
+<tr><td>range mismatch, limited read as full</td><td class="num">389</td><td class="num">0,05%</td></tr>
+<tr><td>correct decode, then unsharp mask ×1,0</td><td class="num">113 469</td><td class="num">14,43%</td></tr>
+<tr><td>correct decode, sharpen chroma planes only</td><td class="num">76 462</td><td class="num">9,72%</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Two things here that are easy to get wrong. First, <strong>the matrix bug clips 157 times more
+samples than the range bug</strong> on saturated content, even though §3 found the range bug costs
+more in dB. Sample count is not damage. A range error is a gentle uniform compression that shifts
+everything slightly; a matrix error is a large excursion that only affects chroma-carrying pixels
+but pushes them hard. Judge by ΔE, not by clip count.</p>
+
+<p>Second, sharpening before the clamp produces more out-of-range samples than either metadata bug
+— 14,43% — with a 95th-percentile overshoot of 67,11 code values. If you sharpen in floating point
+and then clamp, you are clipping detail you just created. Sharpen, then clamp to a legal range you
+chose deliberately, and treat the clamp as part of the grade rather than an afterthought.</p>
+
+<h2>7. Does upscaling in RGB beat upscaling in YUV?</h2>
+
+<p>This is the question people actually ask, and the answer here is a negative result worth
+recording: <strong>it makes almost no difference, and the chroma kernel matters less than
+expected.</strong> Same 4× source, same luma kernel (lanczos), only the chroma path varies.</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Path</th><th class="num">PSNR</th><th class="num">ΔE mean</th><th class="num">|dCb|</th><th class="num">|dCr|</th></tr></thead>
+<tbody>
+<tr class="best"><td>upscale in RGB</td><td class="num">15,09 dB</td><td class="num">8,40</td><td class="num">—</td><td class="num">—</td></tr>
+<tr><td>YUV, chroma lanczos</td><td class="num">15,05 dB</td><td class="num">8,52</td><td class="num">9,46</td><td class="num">10,91</td></tr>
+<tr><td>YUV, chroma bilinear</td><td class="num">14,92 dB</td><td class="num">8,04</td><td class="num">8,35</td><td class="num">9,52</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Converting to RGB, upscaling, and converting back costs <strong>0,04 dB</strong> versus staying
+in YUV with a lanczos chroma kernel. Choosing lanczos over bilinear for chroma is worth
+<strong>0,13 dB</strong>. Both are far below the 2,53 dB a matrix mistake costs, which puts the
+whole debate in perspective: the RGB-vs-YUV question is a rounding error next to getting the
+metadata right.</p>
+
+<p>And there is a genuine conflict in the metrics. Lanczos chroma wins on PSNR (15,05 vs 14,92)
+but <em>loses</em> on ΔE2000 (8,52 vs 8,04). The explanation is ringing: a sharpening chroma kernel
+creates overshoot at colour boundaries, and overshoot that surrounds a saturated edge shifts hue
+more than a soft transition does, even while it lowers squared error overall. If your target is
+perceptual colour accuracy near hard edges — logos, graphics, text overlays, anime line art — a
+plain bilinear chroma upscale is the better choice despite the worse PSNR. Do not let one number
+decide this.</p>
+
+<h2>8. The three-line diagnostic</h2>
+
+<p>Everything above reduces to one decisive test, and it follows from the invariant in §4: neutrals
+have zero chroma, so they are unaffected by any matrix change. Which means the two bugs leave
+completely different fingerprints on a neutral ramp.</p>
+
+<p>Render a grey ramp, push it through the suspect pipeline, and look at the output:</p>
+
+<pre><code>ffmpeg -y -i neutral_ramp.png -vf "scale=out_color_matrix=bt709:out_range=limited" \
+       -pix_fmt yuv420p -c:v libx264 -qp 0 suspect.mp4
+
+# now decode it the way your pipeline decodes it, and measure
+ffmpeg -y -i suspect.mp4 -vf "scale=in_color_matrix=bt601:in_range=full,format=rgb24" out.png</code></pre>
+
+<p>Measured on that pair:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>What you decode wrong</th><th class="num">Neutral ramp max delta</th><th class="num">Neutral ramp mean delta</th><th class="num">Colour bars max delta</th></tr></thead>
+<tbody>
+<tr class="best"><td>matrix only (709 → 601)</td><td class="num">0,0</td><td class="num">0,000</td><td class="num">33,0</td></tr>
+<tr><td>range only (limited → full)</td><td class="num">20,0</td><td class="num">14,553</td><td class="num">16,0</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The matrix row is not "close to zero", it is <strong>exactly zero</strong> — PSNR of the neutral
+ramp against the correct decode is infinite. Thirty-three code values of error on the colour bars,
+and literally nothing on the ramp. The range row is the opposite shape: the ramp is wrong by a mean
+of 14,553, the colour bars by 11,542. Both bugs damage the bars; only one damages the ramp.</p>
+
+<div class="callout">
+<p><strong>The test, in one sentence:</strong> if a neutral ramp comes out wrong, your bug is
+range. If the neutral ramp is perfect but colour is wrong, your bug is matrix. There is no
+ambiguous case, because the matrix provably cannot touch a neutral.</p>
+</div>
+
+<p>The remaining confirmation, if you want one, is that a range error is a near-uniform shift while
+a matrix error is directional in hue. Measured on saturated patches, the range bug shifts lightness
+by 4,56 and <em>hue by 19,78°</em> — clipping distorts hue badly — while the matrix bug shifts hue
+by only 0,71° but lightness by 1,42. On a smooth gradient the pattern inverts: the matrix bug
+shows 4,56° of hue shift, the range bug 1,40°. Content-specific, which is why the neutral-ramp test
+is the reliable one and these numbers are only corroboration.</p>
+
+<h2>9. Fixing it, in ffmpeg, explicitly</h2>
+
+<p>The failure mode to avoid is letting swscale guess. Left to itself it reads the container tags;
+if the tags are missing or wrong, it guesses from resolution, and its guess for anything below 576
+lines is bt601. That single heuristic explains a large fraction of "my HD clip looks orange".</p>
+
+<pre><code># decode, stating the truth about the source rather than trusting tags
+ffmpeg -i in.mp4 \
+  -vf "scale=in_color_matrix=bt709:in_range=limited:flags=lanczos+accurate_rnd+full_chroma_int,format=rgb24" \
+  out.png
+
+# encode, writing the tags so the next tool does not have to guess
+ffmpeg -i in.mov \
+  -vf "scale=out_color_matrix=bt709:out_range=limited" \
+  -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv \
+  out.mp4</code></pre>
+
+<p>Three details that matter more than they look. <code>full_chroma_int</code> keeps chroma
+interpolation at full precision instead of rounding to 8-bit intermediates. <code>accurate_rnd</code>
+does the same for the RGB conversion. And <code>-color_range tv</code> on the output is what stops
+the next tool from repeating the guess; note it is <code>tv</code> for limited and
+<code>pc</code> for full, which is charmingly unintuitive.</p>
+
+<p>Verify rather than assume:</p>
+
+<pre><code>$ ffprobe -v error -select_streams v:0 \
+    -show_entries stream=color_space,color_range,pix_fmt -of json out.mp4
+
+{"streams":[{"pix_fmt":"yuv420p","color_range":"tv","color_space":"bt709"}]}</code></pre>
+
+<p>If <code>color_space</code> is absent from that output, the tags are missing and every downstream
+tool is guessing. That is the condition to fix before you touch anything else — a file with no
+matrix tag is not "probably fine", it is undefined, and different tools will resolve it
+differently, which is how a single file ends up looking correct in one player and wrong in another.</p>
+
+<h2>10. What this actually means for an upscale</h2>
+
+<ol>
+<li><strong>Fix metadata before the upscaler, not after.</strong> The upscaler cannot detect the
+error and provably does not dilute it (§6). Anything you do downstream is colour correction applied
+on top of a wrong decode, which is guesswork.</li>
+<li><strong>Validate on saturated content.</strong> A grey-ramp test passes a wrong matrix at
+0,02 dB. If your QA material is neutral, your QA cannot see this class of bug.</li>
+<li><strong>Judge with ΔE, not PSNR or clip count.</strong> §7 has a case where PSNR and ΔE2000
+rank two options in opposite orders, and §6 has a case where the bug with 157× the clipping costs
+less.</li>
+<li><strong>Expect more damage on 4:2:0.</strong> Chroma is already down 6,02 dB before the matrix
+error is applied to it.</li>
+<li><strong>Write the tags on output.</strong> The bug is nearly always inherited, not invented —
+someone upstream omitted <code>-colorspace</code> and the next tool guessed bt601 from a resolution
+heuristic.</li>
+</ol>
+
+<p>The general shape of this result is the same one that recurs across this measurement series:
+the upscaler is the last and least powerful stage in the chain. A matrix mistake is a two-byte
+metadata error that costs 16 dB on saturated content, survives every resampler unchanged, and is
+invisible to grey-ramp testing. No amount of model quality recovers it, because there is nothing to
+recover — the numbers were already wrong when they arrived. Getting the
+<a href="https://upgolab.com">colour pipeline right before you upscale</a> is worth more than any
+choice of kernel, and it costs one flag.</p>
+
+<h2>Reproducing this</h2>
+
+<p>No model weights, no vendor SDK. The chart generator, both colour matrices, the 4:2:0
+subsampler, the lanczos resampler and a CIEDE2000 implementation are all plain numpy; the
+cross-check uses ffmpeg 6.1 with <code>libx264</code> at <code>-crf 12</code> or <code>-qp 0</code>
+so the codec is not the variable. Total runtime under two minutes on one core. The only non-obvious
+requirement is that the reference chart must contain saturated patches — a mid-tone chart will
+report that your broken pipeline is fine.</p>
+</article>
+
+<footer>
+<nav class="sisternav" aria-label="More measured upscaling guides">
+<p>More measured guides</p>
+<ul>
+  <li><a href="https://celticgemini001.github.io/upgolab-tools/">All guides (index)</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-2k-vs-4k-decision/">2K or 4K</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-ai-upscaler-guide/">AI Upscaling Explained</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-anisotropic-upscale/">Upscaling One Axis</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-bit-depth-banding/">8-bit vs 10-bit</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-chroma-subsampling/">Chroma Subsampling Before You Upscale</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-color-matrix-and-range/">Colour Matrix and Range Before Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-exif-orientation-upscale/">EXIF Orientation and Upscale Order</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-fractional-upscale-factors/">Fractional Upscale Factors</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-gamma-vs-linear-light/">Gamma Space vs Linear Light</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-halftone-dots-upscaling/">Halftone Dots Under Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-hdr-upscaling-bit-depth/">Upscaling HDR Photographs</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-interlaced-video-upscale/">Interlaced Video Before Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-jpeg-blocking-upscale/">JPEG Blocking Under Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-motion-blur-before-upscale/">Motion Blur Before an Upscale</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-noise-and-grain-upscaling/">Noise and Grain Under Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-old-footage-restoration/">Restoring Old Family Video Without a Workstation</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-output-format-after-upscale/">Output Format After Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-remove-background-and-upscale/">Cutout and Upscale in One Workflow</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-screen-recording-4k/">Turning a 1080p Screen Recording Into a Usable 4K Asset</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-sharpen-before-or-after-upscale/">Sharpen Before or After Upscaling? The Order Survives Float, Not a File</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-thumbnail-4k-master/">Making a 4K Thumbnail Master From a 720p Frame</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-tiled-upscale-seams/">Tiled Upscaling Seams</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-tools/">AI Upscaling Notes</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-upscale-anime-illustration/">Upscaling Line Art Without Destroying the Lines</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-upscale-product-photos/">A Product Shot and a Face Fail in Opposite Directions</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-upscale-vs-reshoot/">Re-Shoot or Upscale? The Break-Even Point, Measured in Decibels and Millimetres</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-video-upscaling-limits/">Why Video Upscaling Is Not Image Upscaling, Repeated 300 Times</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-what-nofollow-means/">rel=nofollow vs rel=nofollow,noopener — Measured in a Real Browser</a></li>
+</ul>
+</nav>
+</footer>
+</main>
+</body>
+</html>
