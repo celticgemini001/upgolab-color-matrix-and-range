@@ -154,6 +154,28 @@ cancel on some patches.</p>
 <p>That ordering is not a law. §4 shows it depends entirely on content, and on mid-tone material
 both mistakes cost almost nothing at all.</p>
 
+<p>Because table 1 is computed with our own arithmetic, it needs an independent engine. The same
+two mistakes were re-run through a real <code>libx264</code> round-trip at CRF 18 with swscale doing
+the conversion, comparing against a correct decode of the same file:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Mistake</th><th class="num">ffmpeg cost</th><th class="num">numpy cost (§3)</th><th class="num">Channel bias, R/G/B</th></tr></thead>
+<tbody>
+<tr class="best"><td>709 encoded, 601 decoded</td><td class="num">−2,04 dB</td><td class="num">−2,53 dB</td><td class="num">−0,79 / −0,58 / +0,44</td></tr>
+<tr><td>limited encoded, full decoded</td><td class="num">−3,59 dB</td><td class="num">−4,24 dB</td><td class="num">−2,59 / −1,68 / −0,57</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Two different implementations, 8-bit versus float arithmetic, a real codec in the loop: the
+magnitudes agree to within half a decibel and the <em>ordering</em> agrees exactly — range costs
+more than matrix on this content. The channel biases are a useful independent fingerprint too. The
+matrix mistake is <strong>not directionally uniform</strong> (−0,79 red, +0,44 blue); the range
+mistake is <strong>monotone-negative on all three</strong> (−2,59, −1,68, −0,57), which is what a
+range compression looks like. If you are staring at a bad output and wondering which bug you have,
+the sign pattern across channels is the first tell.</p>
+
 <h2>4. The headline result: the same bug is 0,02 dB or 16 dB, depending on content</h2>
 
 <p>Three content classes, each encoded at CRF 12 so the codec is not the variable, each decoded
