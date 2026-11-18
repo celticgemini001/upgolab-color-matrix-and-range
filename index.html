@@ -4,18 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Colour Matrix and Range Before Upscaling: Two Bugs That Look Identical, Measured</title>
-<meta name="description" content="A bt709/bt601 matrix mismatch and a limited/full range mismatch both tint your output. Measured against a known reference: the same bug costs 0.02 dB on mid-tones and 16 dB on saturated colour, upscaling passes the error through untouched, and a neutral ramp tells you which of the two you actually have in three lines.">
+<meta name="description" content="A bt709/bt601 matrix mismatch and a limited/full range mismatch both tint your output. Measured against a known reference: the same bug costs 0.02 dB on mid-tones and 16 dB on saturated colour, upscaling passes the error through untouched, and a neutral ramp tells you which of the two you actually have in three lines. Chroma siting is a third bug of a different shape: 3.01 dB on an isolated colour edge, 4.33 dB mean over seven real photographs, and 0.014 levels on the grey ramp that catches the other two.">
 <link rel="canonical" href="https://celticgemini001.github.io/upgolab-color-matrix-and-range/">
 <meta property="og:type" content="article">
 <meta property="og:title" content="Colour Matrix and Range Before Upscaling: Two Bugs That Look Identical, Measured">
-<meta property="og:description" content="Encoding bt709 then decoding as bt601 is an exact linear operator: a constant per-channel offset that survives any upscale bit-for-bit. Measured cost 2.53 dB and ΔE 2.78 — but 16.08 dB on saturated colour and 0.02 dB on mid-tone texture. A neutral ramp separates it from a range bug with zero ambiguity.">
+<meta property="og:description" content="Chroma siting is a half-pixel displacement, not a tint: 3.01 dB on an isolated colour edge and 4.33 dB mean over seven real photographs, and swscale ignores the flag entirely. Encoding bt709 then decoding as bt601 is an exact linear operator: a constant per-channel offset that survives any upscale bit-for-bit. Measured cost 2.53 dB and ΔE 2.78 — but 16.08 dB on saturated colour and 0.02 dB on mid-tone texture. A neutral ramp separates it from a range bug with zero ambiguity.">
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"Article",
  "headline":"Colour Matrix and Range Before Upscaling: Two Bugs That Look Identical, Measured",
  "author":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
  "publisher":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
  "datePublished":"2026-11-17",
- "dateModified":"2026-11-17",
+ "dateModified":"2026-11-18",
  "mainEntityOfPage":"https://celticgemini001.github.io/upgolab-color-matrix-and-range/"}
 </script>
 <style>
@@ -434,7 +434,215 @@ metadata error that costs 16 dB on saturated content, survives every resampler u
 invisible to grey-ramp testing. No amount of model quality recovers it, because there is nothing to
 recover — the numbers were already wrong when they arrived. Getting the
 <a href="https://upgolab.com">colour pipeline right before you upscale</a> is worth more than any
-choice of kernel, and it costs one flag.</p>
+choice of kernel, and it costs one flag. There is one more item in that pipeline that is
+metadata rather than numbers, and §11 measures it: the chroma siting flag, worth 3,01 dB on an
+isolated colour edge and exactly nothing on a grey ramp.</p>
+
+<h2>11. The half-pixel that is declared, not stored</h2>
+
+<p>Everything above assumed the chroma planes were where the decoder thinks they are.
+They are not necessarily. A 4:2:0 file keeps <em>one</em> chroma sample per 2×2 luma
+block — 65,536 Cb samples for the 262,144 luma pixels of a 512×512 frame — and the
+standard never says which pixel of that block the sample belongs to. It is metadata,
+with a small set of legal values: <code>center</code> (the sample sits at the block
+centre) or <code>left</code> / <code>top_left</code> (co-sited, on the block corner).
+Get it wrong and every chroma edge in the frame moves by half a luma pixel in both
+axes. That is a quarter of a chroma sample — small enough to be dismissed in review,
+large enough to be measured.</p>
+
+<p>Before any of that, one correction to the model, because the obvious implementation
+is wrong and I shipped it wrong first. A plain box average over the pixels
+<code>2j</code> and <code>2j+1</code> is the mean of the signal on the interval
+<code>[2j, 2j+2)</code>. Its <em>centroid</em> is at <code>2j + 0.5</code>. So a box
+average is centre-sited by construction — writing "phase 0" for a box average silently
+makes the two sitings identical and inverts the conclusion. The first run of this
+experiment reported that a siting mismatch <em>improved</em> PSNR by 0.5 dB, which is
+the signature of exactly that mistake, not of a real effect. Co-sited means the encoder
+resamples at the block corner before averaging, and the decoder has to be told so.</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Encoder</th><th>Decoder assumes</th><th class="num">PSNR</th>
+<th class="num">Cost</th><th class="num">Cb edge at</th></tr></thead>
+<tbody>
+<tr class="best"><td>centre</td><td>centre</td><td class="num">42,561 dB</td>
+<td class="num">—</td><td class="num">255,5 px</td></tr>
+<tr><td>centre</td><td>co-sited</td><td class="num">39,550 dB</td>
+<td class="num">−3,011 dB</td><td class="num">255,0 px</td></tr>
+<tr><td>co-sited</td><td>co-sited</td><td class="num">40,130 dB</td>
+<td class="num">—</td><td class="num">255,3 px</td></tr>
+<tr><td>co-sited</td><td>centre</td><td class="num">39,287 dB</td>
+<td class="num">−0,843 dB</td><td class="num">255,8 px</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>One isolated chroma step, 512×512, warm to cool, boundary at x = 256. The cost is
+asymmetric — 3,01 dB one way, 0,84 dB the other — and the reason is not the bug, it is
+that co-sited is a worse <em>representation</em> of this edge to begin with: 40,13 dB
+matched against 42,56 dB matched. A box average is the matched filter for a 2×2 block;
+bilinear sampling at the corner is not. So the honest reading is that a centre-sited
+bitstream decoded as co-sited loses 3,0 dB, and the reverse case loses less only
+because it had less to lose.</p>
+
+<p>What the error is <em>not</em> is a colour shift. Measured on the same pair, the luma
+plane differs by 1,4×10<sup>−14</sup> — float noise, bit-identical for any purpose. The
+whole cost is in the two chroma planes, and it is a <em>displacement</em>, not a
+re-tint: the Cb and Cr values on the flat fields are unchanged to the last bit. That
+distinction is what makes this bug diagnosable at all, and it is the opposite of the
+matrix and range bugs in §3, which shift every pixel including the flat ones.</p>
+
+<h3>What it costs on real photographs, where nobody drew an edge for you</h3>
+
+<p>Seven distinct photographs, 512×512 detailed crops, encoded 4:2:0 centre-sited and
+decoded both ways. PSNR is against the original RGB, so the matched column includes the
+4:2:0 subsampling cost itself and the mismatch column is that plus the siting error:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Crop</th><th class="num">matched</th><th class="num">mismatched</th>
+<th class="num">cost</th><th class="num">px &gt;2 lv (right)</th>
+<th class="num">px &gt;2 lv (wrong)</th></tr></thead>
+<tbody>
+<tr><td>048d3778</td><td class="num">55,56</td><td class="num">50,65</td><td class="num">4,91</td><td class="num">0,95%</td><td class="num">7,26%</td></tr>
+<tr><td>1344197c</td><td class="num">55,69</td><td class="num">51,27</td><td class="num">4,43</td><td class="num">0,94%</td><td class="num">6,65%</td></tr>
+<tr><td>6766a320</td><td class="num">55,51</td><td class="num">50,08</td><td class="num">5,43</td><td class="num">1,77%</td><td class="num">6,95%</td></tr>
+<tr><td>792e8b64</td><td class="num">58,25</td><td class="num">55,00</td><td class="num">3,25</td><td class="num">0,47%</td><td class="num">1,69%</td></tr>
+<tr><td>ac7b6755</td><td class="num">54,36</td><td class="num">49,56</td><td class="num">4,80</td><td class="num">1,12%</td><td class="num">10,31%</td></tr>
+<tr><td>b4fd2338</td><td class="num">55,49</td><td class="num">51,31</td><td class="num">4,18</td><td class="num">1,22%</td><td class="num">4,04%</td></tr>
+<tr><td>c079d084</td><td class="num">58,13</td><td class="num">54,82</td><td class="num">3,31</td><td class="num">0,70%</td><td class="num">2,21%</td></tr>
+<tr class="best"><td><strong>mean</strong></td><td class="num">—</td><td class="num">—</td><td class="num"><strong>4,33</strong></td><td class="num">—</td><td class="num">—</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The dB figures are large because the reference is the pre-subsampling original and
+these are near-lossless round trips; read them as a ratio, not as an absolute quality
+verdict. The column that matters is the last two. Correctly decoded, 0,47–1,77% of
+pixels move by more than two code values — that is the subsampling cost you accepted.
+Decoded at the wrong siting, 1,69–10,31%. On the worst crop one pixel in ten is
+visibly displaced, from a flag nobody set.</p>
+
+<h3>Upscaling multiplies the displacement, exactly</h3>
+
+<p>The temporal result earlier in this series is that per-frame interpolation is
+<em>more</em> stable than ground truth because it has already destroyed the detail, so
+the obvious next question is whether a resampler also dilutes a displacement. It does
+not, and the arithmetic is the same argument as §6: a half-sample shift is a linear
+phase ramp in the frequency domain, and resampling is linear, so the two commute. A
+0,5-pixel shift stays a 0,5-pixel shift in source coordinates, which means it becomes a
+2-pixel shift at 4×. Measured on the same isolated step:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th class="num">Scale</th><th class="num">matched edge</th>
+<th class="num">mismatched edge</th><th class="num">shift, output px</th>
+<th class="num">shift, source px</th></tr></thead>
+<tbody>
+<tr><td class="num">1×</td><td class="num">255,5</td><td class="num">255,0</td><td class="num">−0,5</td><td class="num">−0,5</td></tr>
+<tr><td class="num">4×</td><td class="num">1023,5</td><td class="num">1021,5</td><td class="num">−2,0</td><td class="num">−0,5</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>So the upscale is neutral on the <em>error</em> and worse on the <em>evidence</em>:
+the defect is now four times larger in pixels and still the same fraction of the frame,
+which is precisely the condition under which whole-image metrics report it identically
+before and after. Fixing the siting after the upscale is not possible — you would have to
+resample the chroma planes backwards by half a pixel at the new scale, which is a second
+interpolation of a plane that has already been through two.</p>
+
+<h3>A negative result: ffmpeg writes the tag, and its own decoder ignores it</h3>
+
+<p>I expected this section to end with a reproduction on a real bitstream. It half did.
+<code>libx264</code> with no flag writes <code>chroma_location=left</code> — co-sited,
+not centre, which is not the MPEG-2 heritage default people assume. Passing
+<code>-chroma_sample_location center</code> writes <code>center</code>. And
+<code>h264_metadata=chroma_sample_loc_type=0</code> re-tags an existing file to
+co-sited without re-encoding, with the raw yuv420p planes byte-identical before and
+after (md5 <code>2c6666f2dc4d</code> in all three files). All of that works.</p>
+
+<p>What does not work is the decode. Three files — one tagged <code>center</code>, one
+tagged <code>left</code> by default, one re-tagged to <code>left</code> from a
+centre-sited encode — decode through swscale to <strong>bit-identical</strong> RGB: md5
+<code>a574ddd93d04</code> three times. swscale does not read
+<code>chroma_location</code>. It reconstructs at one fixed phase regardless of what the
+container says.</p>
+
+<div class="callout warn">
+<p><strong>Which means the bug is real in the spec and invisible in the default
+toolchain.</strong> Two decoders that disagree about siting will disagree about every
+chroma edge in the frame by half a pixel, and neither of them will tell you. If your
+pipeline is ffmpeg end to end you will never see it — which is also why you cannot use
+ffmpeg to test for it. The measurement above is done in numpy precisely because the
+reference implementation declines to participate.</p>
+</div>
+
+<h3>The diagnostic, and why it is not the neutral ramp</h3>
+
+<p>§8 separates the matrix bug from the range bug with a grey ramp, because a neutral
+pixel carries no chroma and a matrix error provably cannot touch it. That test is blind
+to this one. On a neutral chart the two sitings differ by a maximum of
+<strong>0,014 code values</strong> in Cb and <strong>0,0</strong> in Cr — not "small",
+zero to the bit depth. A siting error is a spatial offset, and a neutral image has no
+chroma edges to offset.</p>
+
+<p>So the test is different in kind, and it needs an edge rather than a patch: render one
+hard colour boundary, decode both ways, and locate the 50% crossing of the Cb plane. If
+the crossing moves by 0,5 px when you flip the flag, you have found it. If it does not
+move, either the flag is not being read — the ffmpeg case above — or the content has no
+chroma edge in it. Those are the only two outcomes, and telling them apart is the whole
+job.</p>
+
+<pre><code>import numpy as np
+
+def sample(a, ys, xs):
+    """Bilinear resample of a 2-D plane at float coordinates, edge-clamped."""
+    iy = np.clip(np.floor(ys).astype(int), 0, a.shape[0]-1)
+    ix = np.clip(np.floor(xs).astype(int), 0, a.shape[1]-1)
+    iy1, ix1 = np.minimum(iy+1, a.shape[0]-1), np.minimum(ix+1, a.shape[1]-1)
+    wy, wx = (ys-np.floor(ys))[:, None], (xs-np.floor(xs))[None, :]
+    return (a[iy, ix]*(1-wy)*(1-wx) + a[iy1, ix]*wy*(1-wx)
+            + a[iy, ix1]*(1-wy)*wx + a[iy1, ix1]*wy*wx)
+
+def shift(a, dy, dx):
+    return sample(a, np.arange(a.shape[0])+dy, np.arange(a.shape[1])+dx)
+
+def encode_420(ycc, co_sited):
+    """One chroma sample per 2x2 block. A plain box average has its centroid at
+    the block CENTRE (2j+0.5); co-sited means sampling the corner first."""
+    cs = ycc[..., 1:]
+    if co_sited:                      # resample at the corner, then box
+        cs = np.stack([shift(cs[..., k], -0.5, -0.5) for k in range(2)], -1)
+    return ycc[..., 0].copy(), 0.25 * (cs[0::2, 0::2] + cs[0::2, 1::2]
+                                       + cs[1::2, 0::2] + cs[1::2, 1::2])
+
+def decode_420(y, c, centroid):
+    """Reconstruct assuming sample (i,j) sits at luma (2i+centroid, 2j+centroid).
+    centroid=0.5 -> centre-sited, centroid=0.0 -> co-sited."""
+    h, w = y.shape
+    sy = (np.arange(h) - centroid) / 2.0
+    sx = (np.arange(w) - centroid) / 2.0
+    return np.stack([y, sample(c[..., 0], sy, sx),
+                        sample(c[..., 1], sy, sx)], -1)
+
+# one hard chroma step, 512x512, boundary at x = 256
+rgb = np.zeros((512, 512, 3))
+rgb[:, :256], rgb[:, 256:] = (190, 45, 45), (40, 60, 190)
+ycc = rgb @ M.T                       # bt709, limited range
+y, c = encode_420(ycc, co_sited=False)
+right = decode_420(y, c, 0.5)         # what the encoder actually stored
+wrong = decode_420(y, c, 0.0)         # the flag flipped
+
+# the flag is worth 3.01 dB on this edge, 0.00 on a grey ramp,
+# and the edge moves 0.5 px at 1x and 2.0 px at 4x -- same 0.5 source pixels</code></pre>
+
+<p>Three practical consequences, in the order they cost money. Write the tag on output,
+because the encoder default is not the one most people assume. Read it on input before
+you trust a comparison between two tools. And treat "we are all ffmpeg here" as the
+reason to check by hand rather than the reason not to — the reference decoder will
+happily produce the wrong phase and report nothing, and the only symptom left is a
+half-pixel offset in the one plane your quality metric underweights.</p>
 
 <h2>Reproducing this</h2>
 
